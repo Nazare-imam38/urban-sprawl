@@ -1,0 +1,178 @@
+# --- Study area (WGS84) — drives clipping for all downloads ---
+# Recommended boxes (xmin, ymin, xmax, ymax):
+#   Nairobi:  36.6, -1.5, 37.1, -1.1
+#   Dhaka:    90.2, 23.5, 90.6, 23.9
+#   Wuhan:    113.7, 30.3, 114.6, 30.8
+study_area:
+  name: "Nairobi"
+  xmin: 36.6
+  xmax: 37.1
+  ymin: -1.5
+  ymax: -1.1
+  crs_wgs84: "EPSG:4326"
+  crs_projected: "EPSG:21037"  # UTM / regional — match your city
+
+paths:
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  outputs_dir: "outputs"
+
+# --- Phase 1: Microsoft Planetary Computer (rstac) ---
+planetary_computer:
+  stac_url: "https://planetarycomputer.microsoft.com/api/stac/v1"
+  sign_endpoint: "https://planetarycomputer.microsoft.com/api/sas/v1/sign"
+  # Target resolution for saved Sentinel-2 stack (10m after resampling 20m bands)
+  s2_output_resolution_m: 10
+  sentinel2:
+    collection: "sentinel-2-l2a"
+    years: [2018, 2020, 2022, 2024]
+    # Dry season: January–March; expand programmatically if no scenes
+    season_month_start: 1
+    season_month_end: 3
+    cloud_cover_max_percent: 10
+    cloud_cover_relaxed_percent: 20
+    bands_10m: ["B02", "B03", "B04", "B08"]
+    bands_20m: ["B11", "B12", "SCL"]
+    stac_limit: 500
+  landsat:
+    collection: "landsat-c2-l2"
+    # One scene per year; platform matches STAC (e.g. landsat-5, landsat-7).
+    # If Phase 1 finds no scene, widen season_month_* or raise stac_limit — script also retries full year + cloud to 100%.
+    acquisitions:
+      - year: 2000
+        platform: "landsat-5"
+      - year: 2010
+        platform: "landsat-7"
+    season_month_start: 1
+    season_month_end: 3
+    cloud_cover_max_percent: 10
+    cloud_cover_relaxed_percent: 20
+    stac_limit: 500
+    # PC asset keys → written layer names (align with USGS-style names for Phase 2)
+    band_map:
+      blue: "SR_B2"
+      green: "SR_B3"
+      red: "SR_B4"
+      nir08: "SR_B5"
+      swir16: "SR_B6"
+      swir22: "SR_B7"
+      qa_pixel: "QA_PIXEL"
+
+# GlobeLand30: manual download from globallandcover.com → place tiles per year, then run prepare_globeland30()
+# Class codes: 10 cropland, 20 forest, 30 grassland, 40 shrubland, 50 wetland, 60 water, 70 tundra,
+#   80 artificial (urban), 90 bare, 100 snow/ice
+globeland30:
+  years: [2000, 2010, 2020]
+  # Optional: glob of raw tiles before merge (example)
+  # raw_tile_glob_2000: "data/raw/globeland30/tiles_2000/*.tif"
+
+classification:
+  classes:
+    - Urban
+    - Vegetation
+    - BareSoil
+    - Water
+  target_overall_accuracy: 0.85
+  # If training_samples.gpkg is missing, Phase 3 builds points from reference land cover (no manual digitizing).
+  auto_training:
+    enable: true
+    source: esa_worldcover
+    # Planetary Computer id is "esa-worldcover" (2020 + 2021 tiles; v100/v200 are product versions, not this id).
+    stac_collection: esa-worldcover
+    datetime: "2020-01-01/2020-12-31"
+    asset_name: map
+    n_per_class: 400
+    # Optional: align sampling grid to a specific Phase 2 year (default = latest Sentinel year in config)
+    # ref_align_year: 2024
+    # Alternative: use merged GlobeLand30 GeoTIFF from Phase 1 instead of STAC:
+    # source: globeland30
+    # globeland30_path: "data/raw/globeland30/GL30_2020.tif"
+  # Full-raster SVM loads all pixels into RAM — use prediction settings on modest machines:
+  prediction:
+    memory_safe: true       # RF → GeoTIFF; SVM → spatial tiles + VRT; 3×3 focal → GeoTIFF
+    tiles_x: 2
+    tiles_y: 2              # increase (e.g. 3×3) if a tile still exhausts RAM
+    skip_focal: false       # true = skip 3×3 majority (faster, less smoothing)
+    memfrac: 0.25           # terra block cache cap; omit or set null to leave default
+    cleanup_temp: true      # remove temp dirs after each year (set false to debug)
+
+cnn:
+  # If Phase 4 says no positive train patches but change exists, other seeds are tried automatically.
+  # spatial_split_seed: 42
+  # spatial_split_seeds_fallback: [101, 202, 303]
+  patch_size: 64
+  patch_stride_train: 32      # 50% overlap when extracting training patches
+  # Infer stride: 32 ≈ 4× fewer patches than 16 (faster CPU); use 16 for maximum overlap / quality
+  patch_stride_infer: 32
+  # Inference loads rasters in thin row-bands to avoid RAM spikes (see infer_row_band_steps)
+  infer_batch_size: 16       # torch batch per forward (lower if CPU RAM is tight)
+  infer_row_band_steps: 8    # r0 grid lines per band; lower = less RAM, more disk reads
+  infer_progress_every: 2500  # message every N patches (0 = silent)
+  center_label_px: 8          # majority label from centre region
+  # Positive patch if >= this fraction of centre pixels are change.
+  # If change is scattered, lower this (e.g. 0.1) or reduce center_label_px.
+  center_label_threshold: 0.1
+  in_channels: 11
+  balance_unchanged_to_changed: 3
+  batch_size: 32
+  epochs_max: 50
+  early_stop_patience: 10
+  lr: 0.001
+  grad_clip_norm: 1.0
+  min_connected_pixels: 9     # MMU for post-processing (10 m ≈ 900 m²)
+  # Bi-temporal pairs for change detection (pre/post years)
+  transitions:
+    - pre: 2000
+      post: 2010
+    - pre: 2010
+      post: 2018
+    - pre: 2018
+      post: 2024
+
+# Phase 5 — Shannon entropy, UEII, landscape metrics (CBD / centre in WGS84)
+sprawl:
+  centre_lon: 36.8219   # Nairobi CBD area — replace for your city
+  centre_lat: -1.2864
+  ring_step_km: 5
+  ring_max_km: 30
+  # Hotspot rule: UEII above mean + 1 SD and zone inner radius (km) strictly greater than:
+  hotspot_fringe_inner_km: 10
+  # Directional wedges: radius in metres (cover AOI — increase if needed)
+  sector_radius_m: 80000
+
+# Phase 6 — Spatial drivers (optional rasters: WorldPop DEM downloaded by user)
+# Low-RAM workflow: run_phase6_build() → run_phase6_sample() → run_phase6_models(), or run_phase6().
+# GWR (GWmodel) is very heavy; keep run_gwr false unless you need local coefficients.
+#
+# Speed: distances on full 10 m LULC can take hours. Default coarsen_fact aggregates the grid (~64× fewer
+# cells at fact 8). Set coarsen_fact: 1 for native resolution (slow). Or set working_resolution_m: 100
+# to target ~100 m pixels (overrides coarsen_fact).
+# OSM roads are saved to data/processed/phase6_osm_roads.gpkg after first download; delete it or set
+# refresh_osm_cache: true to fetch again.
+phase6:
+  growth_year_t0: 2000
+  growth_year_t1: 2024
+  coarsen_fact: 8             # 1 = no aggregation (very slow); 8–12 typical for city-scale drivers
+  # working_resolution_m: 100  # optional: target pixel size (m); uncomment to use instead of coarsen_fact
+  refresh_osm_cache: false
+  # osm_roads_cache: "data/processed/phase6_osm_roads.gpkg"  # optional custom cache path
+  n_sample_per_stratum: 1000   # per class (growth / non-growth); lower = less RAM / faster
+  knn_k: 8
+  run_gwr: false               # true = bandwidth search + GWR (slow, high memory)
+  # Optional GeoTIFF paths (null = skip layer or use flat fill where noted in script)
+  worldpop_2000_path: null
+  dem_path: null
+
+# Phase 7 — Maps, charts, leaflet dashboard, R Markdown report
+phase7:
+  map_dpi: 300
+  chart_dpi: 300
+  # Coarsen rasters before projecting to WGS84 for leaflet (speed / file size)
+  leaflet_aggregate_fact: 4
+
+# Legacy / optional: Google Earth Engine (not required for Phase 1)
+gee:
+  sentinel2_start: "2018-01-01"
+  sentinel2_end: "2024-12-31"
+  landsat_start: "1990-01-01"
+  landsat_end: "2024-12-31"

@@ -1,0 +1,204 @@
+================================================================================
+URBAN SPRAWL PROJECT — COMPLETE IMPLEMENTATION GUIDE (PHASES 0–7)
+================================================================================
+Generated for: Multi-Temporal Urban Sprawl Detection and Growth Pattern Analysis
+Primary config: config/study_area.yml
+Working directory: project root (Urban Sprawl folder, or open UrbanSprawl.Rproj)
+
+--------------------------------------------------------------------------------
+1. PROJECT PURPOSE
+--------------------------------------------------------------------------------
+End-to-end R pipeline to:
+  • Acquire multi-temporal optical imagery (Sentinel-2, Landsat) via Microsoft
+    Planetary Computer
+  • Build normalized feature stacks and classify land cover (RF + SVM)
+  • Detect new urban growth with a Siamese CNN (torch) between year pairs
+  • Quantify sprawl patterns (Shannon entropy, UEII, landscape metrics, hotspots)
+  • Relate growth to spatial drivers (roads, CBD distance, urban proximity, NDVI
+    loss, optional DEM/WorldPop)
+  • Produce static maps, charts, an interactive Leaflet dashboard, and an HTML
+    report
+
+--------------------------------------------------------------------------------
+2. DIRECTORY LAYOUT (KEY PATHS)
+--------------------------------------------------------------------------------
+config/study_area.yml     — AOI, CRS, STAC years, CNN transitions, sprawl centre,
+                            phase6/phase7 options
+R/00_setup.R              — Libraries, project_root(), load_config(), pipeline_log,
+                            with_pipeline_phase() (terminal banners / stderr flush)
+R/01_aoi_datasets.R       — Phase 1: downloads & composites
+R/02_preprocessing.R      — Phase 2: features_*.tif, normalization_params.csv
+R/03_lulc_rf_svm.R        — Phase 3: LULC, models, accuracy_report.csv
+R/04_cnn_change_detection.R — Phase 4: CNN change maps & metrics
+R/05_shannon_entropy.R    — Phase 5: entropy, UEII, hotspots, directional chart
+R/06_spatial_patterns.R   — Phase 6: driver stack, sampling, GLM / spatial models
+R/07_visualization.R      — Phase 7: tmap, ggplot2, leaflet, R Markdown report
+
+data/raw/                 — S2/Landsat composites, optional GlobeLand30 tiles
+data/processed/           — features_*, lulc_*, phase6 rasters, CSVs, shapefiles
+outputs/                  — CNN outputs, maps/, charts/, HTML, accuracy CSVs
+docs/                     — methodology figure, urban_sprawl_report.Rmd template
+scripts/install_dependencies.R — one-shot package install helper
+
+--------------------------------------------------------------------------------
+3. PHASE-BY-PHASE IMPLEMENTATION
+--------------------------------------------------------------------------------
+
+PHASE 1 — Study area & imagery (R/01_aoi_datasets.R)
+  • STAC search on Planetary Computer; signed URLs; stream COGs with terra
+  • Sentinel-2 L2A: configurable years (default 2018,2020,2022,2024), dry season,
+    cloud filters → data/raw/sentinel2/S2_composite_{year}.tif
+  • Landsat C2 L2: configured acquisitions (e.g. 2000 L5, 2010 L7) →
+    data/raw/landsat/LS_composite_{year}.tif
+  • AOI crop/mask from study_area bbox + crs_projected
+  • GlobeLand30: manual download; merge with prepare_globeland30()
+  Command:
+    source("R/01_aoi_datasets.R"); run_phase1()
+
+PHASE 2 — Preprocessing (R/02_preprocessing.R)
+  • S2: SCL mask; Landsat: QA_PIXEL bitmask
+  • Reflectance scaling; indices (NDVI, NDBI, MNDWI, NBI, BSI)
+  • Per-layer min–max normalization; writes normalization_params.csv
+  • Outputs: data/processed/features_{year}.tif
+  Command:
+    source("R/02_preprocessing.R"); run_phase2(quality_check = TRUE)
+
+PHASE 3 — LULC classification (R/03_lulc_rf_svm.R)
+  • Classes 1–4: Urban, Vegetation, Bare soil, Water
+  • Training: auto from ESA WorldCover (or GlobeLand30 / manual mapedit gpkg)
+  • RF + SVM per sensor (Sentinel vs Landsat); caret split & confusion matrix
+  • Prediction: tiled/memory-safe options in yml; focal majority + spectral rules
+  • Outputs: lulc_{year}.tif, models *.rds, accuracy_report.csv, urban_area_stats.csv
+  Command:
+    source("R/03_lulc_rf_svm.R"); run_phase3(tune_svm = FALSE)
+
+PHASE 4 — CNN change detection (R/04_cnn_change_detection.R)
+  • Reference from LULC: (pre != urban) & (post == urban); optional Phase 4 maps
+  • Siamese encoder + classifier on 11-channel patch pairs (torch)
+  • Spatial block train/val/test; subset runs via transition_indices or one_transition
+  • Outputs: change_prob_*, change_map_*, cnn_model_best_*.pt, cnn_accuracy_report.csv
+  Command:
+    source("R/04_cnn_change_detection.R"); run_phase4(device = "cpu")
+
+PHASE 5 — Sprawl metrics (R/05_shannon_entropy.R)
+  • Buffer rings from sprawl centre (WGS84 → projected); zonal urban counts
+  • Shannon H, relative entropy, UEII between periods; landscapemetrics on urban
+  • Hotspots (UEII rule + fringe distance); 8-sector directional growth chart
+  • Outputs: CSVs, sprawl_entropy_map.tif, ueii_map.tif, buffer_rings.shp,
+    sprawl_hotspots.shp, directional_growth_chart.png (via phase 7 charts path)
+  Command:
+    source("R/05_shannon_entropy.R"); run_phase5()
+
+PHASE 6 — Spatial drivers (R/06_spatial_patterns.R)
+  • Growth raster from LULC t0/t1; OSM roads (cached as phase6_osm_roads.gpkg)
+  • Predictors: dist roads, dist CBD, dist urban (t0), optional pop/DEM, NDVI loss
+  • Performance: coarsen_fact (default 8) or working_resolution_m — coarse grid +
+    rasterize+grid distance for roads (not full-res geometry distance)
+  • Stepped workflow (RAM-friendly):
+      run_phase6_build()   → spatial_predictors.tif + phase6_growth_*.tif
+      run_phase6_sample()  → regression_samples.csv
+      run_phase6_models()  → GLM, Moran, lagsarlm, charts (GWR optional)
+    Or: run_phase6() / run_phase6(step = "build"|"sample"|"models")
+  • Packages: spdep, spatialreg, sp; GWmodel only if phase6.run_gwr: true
+  Command (example):
+    source("R/06_spatial_patterns.R")
+    run_phase6_build(); run_phase6_sample(); run_phase6_models()
+
+PHASE 7 — Visualization & report (R/07_visualization.R)
+  • tmap: LULC panel, change maps per cnn.transitions, hotspot map
+  • ggplot2: urban trajectory, entropy, landscape metrics, drivers, correlation heatmap
+  • leaflet: urban_sprawl_dashboard.html (coarsened rasters per phase7.leaflet_*)
+  • rmarkdown: docs/urban_sprawl_report.Rmd → outputs/urban_sprawl_report.html
+  Command:
+    source("R/07_visualization.R"); run_phase7()
+  Skip report only:
+    run_phase7(render_report = FALSE)
+
+--------------------------------------------------------------------------------
+4. MAIN OUTPUT FILES (WHERE TO LOOK)
+--------------------------------------------------------------------------------
+Maps:     outputs/maps/lulc_panel_map.png
+          outputs/maps/change_map_PRE_POST.png (one per transition)
+          outputs/maps/sprawl_hotspot_map.png
+
+Charts:   outputs/charts/*.png (urban growth, entropy, landscape, drivers, corr.)
+
+Web:      outputs/urban_sprawl_dashboard.html  (interactive map; improved layer legend panel)
+Reports:  outputs/urban_sprawl_report.pdf       (primary research-style document; needs LaTeX)
+          outputs/urban_sprawl_report.html      (same content, browser view)
+          PDF: TinyTeX + xelatex (Unicode-safe): install.packages("tinytex"); tinytex::install_tinytex()
+
+Tables:   outputs/logistic_regression_results.csv, correlation_matrix.csv, …
+          data/processed/*.csv (entropy, UEII, urban counts, regression samples, …)
+
+--------------------------------------------------------------------------------
+5. CONFIGURATION HIGHLIGHTS (study_area.yml)
+--------------------------------------------------------------------------------
+study_area: bbox, crs_wgs84, crs_projected
+planetary_computer: S2/Landsat years, seasons, cloud limits
+classification: classes, auto_training, prediction tiles / memory_safe
+cnn: transitions (pre/post years), patch sizes, strides, torch options
+sprawl: centre_lon/lat, rings, hotspot rules, sector radius
+phase6: coarsen_fact, working_resolution_m, n_sample_per_stratum, run_gwr,
+        refresh_osm_cache, optional worldpop/dem paths
+phase7: map_dpi, chart_dpi, leaflet_aggregate_fact
+
+--------------------------------------------------------------------------------
+6. TERMINAL / PROGRESS (00_setup.R)
+--------------------------------------------------------------------------------
+pipeline_log() writes timestamped lines to stderr (flushed) for visible progress.
+with_pipeline_phase() wraps major runs with >>> START / <<< FINISHED OK or
+!!! STOPPED on error. Phases 1–7 entry points use this pattern where implemented.
+
+--------------------------------------------------------------------------------
+7. SUGGESTED FULL RUN SEQUENCE (AFTER install_dependencies.R)
+--------------------------------------------------------------------------------
+source("R/01_aoi_datasets.R");        run_phase1()
+source("R/02_preprocessing.R");     run_phase2(quality_check = TRUE)
+source("R/03_lulc_rf_svm.R");         run_phase3(tune_svm = FALSE)
+source("R/04_cnn_change_detection.R"); run_phase4(device = "cpu")
+source("R/05_shannon_entropy.R");   run_phase5()
+source("R/06_spatial_patterns.R");    run_phase6_build(); run_phase6_sample(); run_phase6_models()
+source("R/07_visualization.R");     run_phase7()
+
+--------------------------------------------------------------------------------
+8. CODEBASE REALITY CHECK (vs. common assessments)
+--------------------------------------------------------------------------------
+The following are verified against the R scripts in this repository:
+
+Phase 1 — Planetary Computer signing is implemented (not a stub):
+  R/01_aoi_datasets.R: sign_planetary_href(), rast_from_signed_href() call the PC
+  SAS sign_endpoint and open assets via /vsicurl/.
+
+GlobeLand30 — prepare_globeland30() is a full implementation:
+  merge tiles, project to crs_projected, crop/mask to AOI, write GL30_{year}.tif.
+
+Sentinel-2 empty STAC — if no scene passes cloud filters after retries, the code
+  stops with an explicit error (widen season or cloud in study_area.yml). Landsat
+  has broader retries (full year, platform fallbacks).
+
+Phase 2 — Landsat QA_PIXEL masking uses bitwAnd(qi, QA_MASK_BITS) with
+  QA_MASK_BITS = 58 (bits 1,3,4,5). See R/02_preprocessing.R.
+
+Phase 4 — Spatial block assignment exists: assign_blocks_to_splits(),
+  assign_patches_to_spatial_splits(). Not a purely random pixel split. CPU runtime
+  remains long; use transition_indices / one_transition for smoke tests.
+
+Phase 5 — sprawl_entropy_map.tif: per-year Pi values are rasterized from zonal
+  rings onto a template (rasterize_zone_field). See R/05_shannon_entropy.R.
+
+Phase 6 — spatialreg::lagsarlm() is called with a data.frame + listw built from
+  (x,y) coordinates; no sp object is required for that fit. GWmodel GWR uses
+  sp::Spatial points when run_gwr is true.
+
+Phase 7 — docs/urban_sprawl_report.Rmd exists; render target is
+  outputs/urban_sprawl_report.html (params include project_root).
+
+Recommended smoke tests (still wise even when code is present):
+  • Phase 1: one year / small AOI before full run.
+  • Phase 4: run_phase4(..., one_transition = c(2010L, 2018L)) and lower epochs in yml.
+  • Phase 6: raise coarsen_fact if you want an even faster first regression pass.
+
+================================================================================
+END OF PROJECT_IMPLEMENTATION.txt
+================================================================================

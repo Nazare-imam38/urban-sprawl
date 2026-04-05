@@ -1,0 +1,1002 @@
+---
+title: "Multi-temporal urban sprawl detection and growth-pattern analysis"
+subtitle: "Research report — methods, results, limitations, and research gaps"
+author: "Urban Sprawl R pipeline (Phases 1–7)"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    fig_caption: true
+    keep_tex: false
+    latex_engine: xelatex
+    includes:
+      in_header: latex_preamble.tex
+  html_document:
+    self_contained: true
+    toc: true
+    toc_depth: 3
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    theme: flatly
+    highlight: tango
+    number_sections: true
+    number_section_depth: 3
+    fig_caption: true
+    df_print: kable
+    code_folding: hide
+params:
+  project_root: "."
+  study_name: "Study area"
+  outputs_dir: "outputs"
+  outputs_root: null
+---
+
+```{r setup, include=FALSE}
+`%||%` <- function(x, y) if (is.null(x)) y else x
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.align = "center",
+  dpi = 144
+)
+root_param <- normalizePath(params$project_root, winslash = "/", mustWork = FALSE)
+if (!nzchar(root_param) || !dir.exists(root_param)) {
+  stop("params$project_root must exist: ", params$project_root, call. = FALSE)
+}
+outd <- params$outputs_dir %||% "outputs"
+# Absolute directory where Phase 7 wrote maps/charts (may differ from root/outd if param passed from run_phase7).
+oroot <- params$outputs_root
+if (is.null(oroot) || !nzchar(as.character(oroot))) {
+  oroot <- normalizePath(file.path(root_param, outd), winslash = "/", mustWork = FALSE)
+} else {
+  oroot <- normalizePath(as.character(oroot), winslash = "/", mustWork = FALSE)
+}
+# Resolve true repo root: "." under knit often points at docs/, so config/ and data/processed
+# are missed. Prefer parent of this Rmd, then any candidate whose configured outputs folder has PNGs.
+repo_from_rmd <- tryCatch({
+  rd <- knitr::current_input(dir = TRUE)
+  if (is.null(rd) || !nzchar(rd)) {
+    ""
+  } else {
+    rd <- normalizePath(rd, winslash = "/", mustWork = FALSE)
+    normalizePath(file.path(rd, ".."), winslash = "/", mustWork = FALSE)
+  }
+}, error = function(e) "")
+candidates <- unique(c(
+  repo_from_rmd,
+  root_param,
+  normalizePath(file.path(root_param, ".."), winslash = "/", mustWork = FALSE)
+))
+candidates <- candidates[vapply(candidates, function(r) {
+  nzchar(r) && !is.na(r) && dir.exists(r)
+}, logical(1))]
+count_output_pngs <- function(r) {
+  odir <- normalizePath(file.path(r, outd), winslash = "/", mustWork = FALSE)
+  length(Sys.glob(file.path(odir, "maps", "*.png"))) +
+    length(Sys.glob(file.path(odir, "charts", "*.png")))
+}
+root <- root_param
+picked <- FALSE
+for (r in candidates) {
+  if (count_output_pngs(r) > 0L) {
+    root <- r
+    picked <- TRUE
+    break
+  }
+}
+if (!picked) {
+  for (r in candidates) {
+    if (dir.exists(normalizePath(file.path(r, outd), winslash = "/", mustWork = FALSE))) {
+      root <- r
+      break
+    }
+  }
+}
+# Reconcile oroot with chosen root when outputs_root was not passed (e.g. Knit from RStudio).
+if (is.null(params$outputs_root) || !nzchar(as.character(params$outputs_root))) {
+  oroot <- normalizePath(file.path(root, outd), winslash = "/", mustWork = FALSE)
+}
+png_n_maps <- length(Sys.glob(file.path(oroot, "maps", "*.png")))
+png_n_charts <- length(Sys.glob(file.path(oroot, "charts", "*.png")))
+if (knitr::is_html_output() && png_n_maps + png_n_charts == 0L) {
+  message(
+    "\n*** urban_sprawl_report: no PNG files in ", file.path(outd, "maps|charts"), ".\n",
+    "    Project root: ", root, "\n",
+    "    Outputs dir: ", oroot, "\n",
+    "    This report embeds only those PNGs (from Phase 7). GeoTIFFs (.tif) and CSVs in outputs/\n",
+    "    do not appear as figures until Phase 7 exports maps/charts.\n",
+    "    Run: source(\"R/07_visualization.R\"); run_phase7(render_report = FALSE)\n",
+    "    Then re-render this report. ***\n"
+  )
+}
+
+# HTML: absolute paths + knitr::include_graphics() often break self-contained HTML (links point
+# nowhere). Prefer data: URIs (base64enc). If base64enc is missing, pass paths relative to
+# knit_root_dir so pandoc can pack files into the self-contained document.
+include_project_graphics <- function(paths) {
+  paths <- as.character(paths)
+  paths <- paths[nzchar(paths)]
+  if (!length(paths)) {
+    return(invisible(NULL))
+  }
+  knit_rd <- knitr::opts_knit$get("root.dir")
+  resolve_graphic_path <- function(p) {
+    p <- as.character(p)[1L]
+    if (!length(knit_rd) || !nzchar(knit_rd[[1L]])) {
+      return(normalizePath(p, winslash = "/", mustWork = FALSE))
+    }
+    if (grepl("^/|^[A-Za-z]:[\\\\/]", p)) {
+      return(normalizePath(p, winslash = "/", mustWork = FALSE))
+    }
+    normalizePath(file.path(knit_rd[[1L]], p), winslash = "/", mustWork = FALSE)
+  }
+  paths_abs <- vapply(paths, resolve_graphic_path, character(1), USE.NAMES = FALSE)
+  miss <- !file.exists(paths_abs)
+  if (any(miss)) {
+    stop("Missing figure file(s): ", paste(paths[miss], collapse = ", "), call. = FALSE)
+  }
+  graphics_paths_for_knit <- function(abs_paths) {
+    if (!length(knit_rd) || !nzchar(knit_rd[[1L]])) {
+      return(abs_paths)
+    }
+    kr <- normalizePath(knit_rd[[1L]], winslash = "/", mustWork = FALSE)
+    vapply(abs_paths, function(p) {
+      p <- normalizePath(p, winslash = "/", mustWork = FALSE)
+      pre <- paste0(kr, "/")
+      nc <- nchar(pre)
+      if (nchar(p) >= nc && identical(tolower(substr(p, 1L, nc)), tolower(pre))) {
+        substr(p, nchar(kr) + 2L, nchar(p))
+      } else {
+        p
+      }
+    }, character(1), USE.NAMES = FALSE)
+  }
+  if (knitr::is_latex_output()) {
+    knitr::include_graphics(graphics_paths_for_knit(paths_abs))
+    return(invisible(NULL))
+  }
+  if (!knitr::is_html_output()) {
+    knitr::include_graphics(graphics_paths_for_knit(paths_abs))
+    return(invisible(NULL))
+  }
+  if (!requireNamespace("base64enc", quietly = TRUE)) {
+    warning(
+      "Install package base64enc for reliable HTML figures with this report: install.packages(\"base64enc\")",
+      call. = FALSE
+    )
+    knitr::include_graphics(graphics_paths_for_knit(paths_abs))
+    return(invisible(NULL))
+  }
+  mime_from_ext <- function(p) {
+    switch(tolower(tools::file_ext(p)),
+      png = "image/png", jpg = "image/jpeg", jpeg = "image/jpeg",
+      gif = "image/gif", webp = "image/webp", "image/png"
+    )
+  }
+  parts <- vapply(paths_abs, function(p) {
+    uri <- base64enc::dataURI(file = p, mime = mime_from_ext(p))
+    sprintf(
+      "<p class=\"figure-img-wrap\" style=\"text-align:center;margin:1rem 0;\"><img src=\"%s\" class=\"report-fig-img\" alt=\"\" style=\"max-width:100%%;height:auto;display:block;margin-left:auto;margin-right:auto;border:1px solid #b0b8c2;\"/></p>",
+      uri
+    )
+  }, character(1), USE.NAMES = FALSE)
+  knitr::asis_output(paste(parts, collapse = "\n"))
+  invisible(NULL)
+}
+
+# Absolute path to a file under the project (for existence checks).
+fig_abs <- function(...) {
+  normalizePath(file.path(root, ...), winslash = "/", mustWork = FALSE)
+}
+has <- function(...) file.exists(fig_abs(...))
+# Single relpath for chunk option eval=... — knitr splits options on commas, so
+# eval=has("outputs","maps","x.png") is parsed as multiple options and breaks.
+has_rel <- function(relpath) {
+  file.exists(normalizePath(file.path(root, relpath), winslash = "/", mustWork = FALSE))
+}
+# Figures and many CSVs live under Phase 7 outputs (oroot), not necessarily root/outputs/.
+has_o <- function(path_under_outputs) {
+  file.exists(normalizePath(file.path(oroot, path_under_outputs), winslash = "/", mustWork = FALSE))
+}
+fig_o <- function(path_under_outputs) {
+  p <- normalizePath(file.path(oroot, path_under_outputs), winslash = "/", mustWork = FALSE)
+  if (!file.exists(p)) return(p)
+  if (knitr::is_latex_output() && identical(.Platform$OS.type, "windows")) {
+    sp <- tryCatch(
+      normalizePath(utils::shortPathName(p), winslash = "/", mustWork = FALSE),
+      error = function(e) ""
+    )
+    if (nzchar(sp) && file.exists(sp)) return(sp)
+  }
+  p
+}
+
+# knitr::include_graphics() with absolute paths becomes "../outputs/..." (relative to docs/),
+# then pandoc cannot find the file. Always pass paths relative to knit_root_dir.
+ig_outputs <- function(path_under_outputs) {
+  rel <- gsub("\\\\", "/", file.path(outd, path_under_outputs))
+  knitr::include_graphics(rel)
+}
+
+# Paths passed to knitr::include_graphics() must be LaTeX-safe. Spaces in Windows
+# paths (e.g. C:/Urban Sprawl/...) break \includegraphics unless quoted; knitr
+# may not always quote. Use 8.3 short paths for PDF on Windows.
+fig <- function(...) {
+  p <- fig_abs(...)
+  if (!file.exists(p)) return(p)
+  if (knitr::is_latex_output() && identical(.Platform$OS.type, "windows")) {
+    sp <- tryCatch(
+      normalizePath(utils::shortPathName(p), winslash = "/", mustWork = FALSE),
+      error = function(e) ""
+    )
+    if (nzchar(sp) && file.exists(sp)) return(sp)
+  }
+  p
+}
+
+path_proc <- function(...) {
+  normalizePath(file.path(root, "data", "processed", ...), winslash = "/", mustWork = FALSE)
+}
+rp_ch <- file.path(root, "R", "report_knit_charts.R")
+if (!file.exists(rp_ch)) {
+  rp_alt <- file.path(root_param, "R", "report_knit_charts.R")
+  if (file.exists(rp_alt)) rp_ch <- rp_alt
+}
+if (file.exists(rp_ch)) {
+  sys.source(rp_ch, envir = knitr::knit_global())
+}
+
+if (knitr::is_latex_output()) {
+  knitr::opts_chunk$set(out.width = "0.92\\linewidth")
+} else if (knitr::is_html_output()) {
+  knitr::opts_chunk$set(out.width = "100%", out.extra = 'class="report-fig-img"')
+} else {
+  knitr::opts_chunk$set(out.width = "92%")
+}
+```
+
+```{css, echo=FALSE, eval=knitr::is_html_output()}
+/*
+ * IEEE / MDPI–inspired article layout (HTML): serif body, sans headings,
+ * MDPI-style green + IEEE blue accents, structured abstract block, sticky TOC.
+ */
+@import url("https://fonts.googleapis.com/css2?family=Crimson+Pro:ital,wght@0,400;0,600;0,700;1,400&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap");
+
+html { scroll-padding-top: 4.5rem; }
+
+/* Journal masthead strip (MDPI green + IEEE blue) */
+body::before {
+  content: "";
+  display: block;
+  height: 5px;
+  background: linear-gradient(90deg, #1a6f54 0%, #1a6f54 42%, #00629b 42%, #00629b 100%);
+}
+
+body {
+  font-family: "Crimson Pro", "Times New Roman", Times, "Liberation Serif", Georgia, serif;
+  font-size: 17px;
+  line-height: 1.65;
+  margin: 0;
+  padding: 0 0 3rem;
+  color: #222;
+  -webkit-font-smoothing: antialiased;
+}
+
+a, a:focus { color: #00629b; text-decoration: none; }
+a:hover { color: #004870; text-decoration: underline; }
+
+code, kbd, pre, samp {
+  font-family: Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 0.88em;
+}
+div.toc-content :not(pre) > code {
+  background: #eef4f2;
+  padding: 0.1em 0.35em;
+  border-radius: 2px;
+  color: #1a1a1a;
+}
+
+div.main-container.container-fluid {
+  max-width: none;
+  width: 100%;
+  padding-left: clamp(0.75rem, 2vw, 1.75rem);
+  padding-right: clamp(0.75rem, 2vw, 1.75rem);
+}
+
+@media (min-width: 768px) {
+  div.main-container > .row {
+    display: flex;
+    align-items: flex-start;
+    flex-wrap: nowrap;
+    clear: both;
+  }
+  div.main-container > .row > [class*="col-"] {
+    float: none !important;
+  }
+  div.main-container > .row > .col-sm-4.col-md-3 {
+    flex: 0 0 20%;
+    max-width: 20%;
+    width: 20%;
+    position: -webkit-sticky;
+    position: sticky;
+    top: 0.75rem;
+    align-self: flex-start;
+    max-height: calc(100vh - 1.5rem);
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding-right: 0.5rem;
+    box-sizing: border-box;
+    -webkit-overflow-scrolling: touch;
+  }
+  div.main-container > .row > .toc-content.col-sm-8.col-md-9 {
+    flex: 1 1 auto;
+    width: auto !important;
+    max-width: none !important;
+    min-width: 0;
+    padding-left: 0.75rem;
+    box-sizing: border-box;
+    contain: layout style;
+    position: relative;
+    z-index: 1;
+    overflow-x: auto;
+  }
+}
+
+@media (min-width: 992px) {
+  div.main-container > .row > .col-sm-4.col-md-3 {
+    flex: 0 0 17%;
+    max-width: 17%;
+    width: 17%;
+  }
+}
+
+@media (min-width: 768px) {
+  div#TOC.tocify {
+    position: relative !important;
+    top: 0 !important;
+    left: auto !important;
+    right: auto !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    max-height: none !important;
+    height: auto !important;
+    margin-left: 0 !important;
+    margin-top: 0 !important;
+    overflow: visible !important;
+    z-index: 1 !important;
+    font-family: "IBM Plex Sans", system-ui, sans-serif !important;
+    background: #f6faf8 !important;
+    border: 1px solid #c5ddd2;
+    border-radius: 2px;
+    padding: 0.5rem 0.35rem 0.65rem;
+    font-size: 0.78rem;
+    line-height: 1.35;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+  }
+  div#TOC.tocify .tocify-item a,
+  div#TOC.tocify .list-group-item {
+    padding: 0.2rem 0.35rem;
+    border-radius: 2px;
+  }
+  div#TOC.tocify .tocify-focus {
+    background-color: rgba(0, 98, 155, 0.12) !important;
+    border-radius: 2px;
+  }
+}
+
+/* Single-column article measure (journal-like line length) */
+div.toc-content {
+  width: 100%;
+  max-width: 50rem;
+  margin-left: auto;
+  margin-right: auto;
+  box-sizing: border-box;
+}
+
+/* Title block — centered article header */
+#header {
+  text-align: center;
+  max-width: 50rem;
+  margin-left: auto;
+  margin-right: auto;
+  padding: 1.25rem 0.75rem 1.5rem;
+  margin-bottom: 2rem;
+  border-bottom: 3px double #2c3e50;
+  box-sizing: border-box;
+}
+#header::before {
+  content: "Research article";
+  display: block;
+  font-family: "IBM Plex Sans", system-ui, sans-serif;
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.22em;
+  color: #1a6f54;
+  margin-bottom: 1rem;
+}
+h1.title {
+  font-family: "IBM Plex Sans", system-ui, sans-serif;
+  font-weight: 700;
+  font-size: clamp(1.3rem, 2.4vw, 1.8rem);
+  color: #111;
+  line-height: 1.28;
+  letter-spacing: -0.02em;
+  max-width: none;
+  margin-top: 0;
+}
+.subtitle {
+  font-family: "IBM Plex Sans", system-ui, sans-serif;
+  color: #424242;
+  font-size: 0.98rem;
+  font-weight: 500;
+  margin-top: 0.5rem;
+  line-height: 1.45;
+}
+#header .author,
+#header .date {
+  font-family: "IBM Plex Sans", system-ui, sans-serif;
+  font-size: 0.84rem;
+  color: #555;
+  margin-top: 0.65rem;
+}
+
+.level1 { margin-top: 2.25rem; }
+
+/* Section titles: sans, strong rules (IEEE-style clarity) */
+div.toc-content h1 {
+  font-family: "IBM Plex Sans", system-ui, sans-serif;
+  font-size: 1.32rem;
+  font-weight: 700;
+  color: #111;
+  border-bottom: 2px solid #222;
+  padding-bottom: 0.35rem;
+  margin-top: 2.5rem;
+}
+div.toc-content h2 {
+  font-family: "IBM Plex Sans", system-ui, sans-serif;
+  font-size: 1.12rem;
+  font-weight: 600;
+  color: #1a1a1a;
+  margin-top: 2rem;
+  border-bottom: 1px solid #ccc;
+  padding-bottom: 0.25rem;
+}
+div.toc-content h3 {
+  font-family: "IBM Plex Sans", system-ui, sans-serif;
+  font-size: 1.02rem;
+  font-weight: 600;
+  color: #333;
+  margin-top: 1.5rem;
+}
+
+/* Abstract + front matter (MDPI-style panel; explicit fenced div in .Rmd) */
+div.toc-content .journal-abstract-section {
+  background: linear-gradient(180deg, #f5fbf8 0%, #fafcfb 100%);
+  border: 1px solid #b8dcc8;
+  border-left: 5px solid #1a6f54;
+  padding: 1.1rem 1.3rem 1.25rem;
+  margin: 0 0 2.25rem;
+  border-radius: 0 3px 3px 0;
+  box-shadow: 0 1px 4px rgba(26, 111, 84, 0.08);
+}
+div.toc-content .journal-abstract-section h1 {
+  font-size: 1.15rem;
+  color: #1a6f54;
+  border-bottom: none;
+  margin-top: 0;
+  padding-bottom: 0.25rem;
+}
+div.toc-content .journal-abstract-section h1 .header-section-number {
+  color: #1a6f54;
+}
+
+/* Keywords line (MDPI-style) */
+.journal-keywords {
+  font-family: "IBM Plex Sans", system-ui, sans-serif;
+  font-size: 0.86rem;
+  margin-top: 1.1rem;
+  padding-top: 1rem;
+  border-top: 1px solid #a8d4bc;
+  color: #333;
+  line-height: 1.55;
+}
+.journal-keywords strong { color: #1a6f54; font-weight: 700; }
+
+blockquote {
+  border-left: 4px solid #00629b;
+  padding: 0.5rem 1rem;
+  margin: 1.1rem 0;
+  color: #37474f;
+  background: #f4f8fb;
+  font-size: 0.96em;
+}
+
+/*
+ * Figures — IEEE / MDPI–style: single column width, symmetric margins, ruled
+ * panel, caption band matching figure width (no narrower caption than graphic).
+ */
+div.toc-content div.figure {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  width: 100%;
+  max-width: 100%;
+  margin: 2rem auto;
+  padding: 0.85rem 1rem 0.65rem;
+  box-sizing: border-box;
+  text-align: center;
+  background: #fafbfc;
+  border: 1px solid #cfd6de;
+  border-top: 2px solid #1a6f54;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.04);
+}
+div.toc-content div.figure img,
+div.toc-content img.report-fig-img {
+  width: 100% !important;
+  max-width: 100% !important;
+  height: auto !important;
+  margin: 0 auto;
+  display: block;
+  border: 1px solid #b0b8c2;
+  box-sizing: border-box;
+}
+div.toc-content div.figure img {
+  background: #fff;
+}
+div.toc-content p img.report-fig-img {
+  width: 100% !important;
+  max-width: 100% !important;
+}
+/* Multi-panel change maps: equal cell width, symmetric gutters (MDPI-style grid) */
+div.toc-content .journal-figure-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 16.5rem), 1fr));
+  gap: 1rem 1.15rem;
+  width: 100%;
+  max-width: 100%;
+  margin: 2rem auto;
+  padding: 1rem 1rem 0.85rem;
+  box-sizing: border-box;
+  background: #fafbfc;
+  border: 1px solid #cfd6de;
+  border-top: 2px solid #00629b;
+  justify-items: stretch;
+  align-items: start;
+}
+div.toc-content .journal-figure-grid > p {
+  margin: 0;
+  display: block;
+  width: 100%;
+  text-align: center;
+}
+div.toc-content .journal-figure-grid img {
+  width: 100% !important;
+  max-width: 100% !important;
+  height: auto !important;
+  display: block;
+  margin: 0 auto;
+  border: 1px solid #b0b8c2;
+  box-sizing: border-box;
+  background: #fff;
+}
+/* If knitr wraps each map in .figure, strip outer panel so grid stays symmetric */
+div.toc-content .journal-figure-grid .figure {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  border-top: none !important;
+  width: 100%;
+  max-width: 100%;
+}
+div.toc-content .journal-figure-grid .figure img {
+  border: 1px solid #b0b8c2;
+}
+div.toc-content .journal-figure-grid .figure p.caption {
+  border-top: none;
+  font-size: 0.72rem;
+  margin-top: 0.35rem;
+  padding-top: 0;
+}
+/* Captions: full width of figure panel; justified with centered last line (common in journals) */
+div.toc-content p.caption,
+div.toc-content .figure p.caption,
+div.toc-content .figure .caption,
+div.toc-content figcaption {
+  font-family: "IBM Plex Sans", system-ui, sans-serif;
+  font-size: 0.78rem;
+  font-weight: 400;
+  color: #333;
+  text-align: justify;
+  text-align-last: center;
+  hyphens: auto;
+  -webkit-hyphens: auto;
+  width: 100%;
+  max-width: 100%;
+  margin: 0.65rem 0 0;
+  padding: 0.55rem 0.15rem 0;
+  line-height: 1.48;
+  border-top: 1px solid #dde3ea;
+  box-sizing: border-box;
+}
+div.toc-content p.caption strong:first-child,
+div.toc-content .figure p.caption strong:first-child {
+  font-weight: 700;
+  color: #111;
+}
+
+/* Tables — simple journal grid */
+div.toc-content table {
+  max-width: 100%;
+  font-size: 0.94rem;
+  border-collapse: collapse;
+  margin: 1rem 0;
+  font-variant-numeric: tabular-nums;
+}
+div.toc-content table th {
+  font-family: "IBM Plex Sans", system-ui, sans-serif;
+  font-weight: 600;
+  border-top: 2px solid #222;
+  border-bottom: 1px solid #222;
+  padding: 0.45rem 0.65rem;
+  text-align: left;
+  background: #f8f9fa;
+}
+div.toc-content table td {
+  border-bottom: 1px solid #ddd;
+  padding: 0.45rem 0.65rem;
+  vertical-align: top;
+}
+
+div.toc-content .html-widget {
+  max-width: 100% !important;
+  width: 100% !important;
+  margin-left: auto !important;
+  margin-right: auto !important;
+  box-sizing: border-box;
+}
+
+/* paged / DT tables (if any) must not escape the article column */
+div.toc-content .pagedtable,
+div.toc-content .pagedtable-wrapper,
+div.toc-content .datatables,
+div.toc-content div.dataTables_wrapper {
+  max-width: 100% !important;
+  overflow-x: auto !important;
+  box-sizing: border-box;
+}
+
+@media (max-width: 767px) {
+  div#TOC.tocify {
+    position: relative !important;
+    top: auto !important;
+    left: auto !important;
+    width: 100% !important;
+    max-height: none !important;
+    margin-bottom: 1rem;
+  }
+  div.toc-content { max-width: none; }
+  #header { max-width: none; }
+}
+```
+
+:::: {.journal-abstract-section}
+
+# Abstract
+
+This document is the main **research-style written deliverable** for the Urban Sprawl pipeline. It summarizes methods, **actual outputs** embedded from `outputs/` (maps, charts, tables), and an **honest** statement of limitations and **research gaps** (what we did *not* establish—e.g. causality, independent validation of the CNN, full-resolution drivers). The **PDF** version (`urban_sprawl_report.pdf`) is intended for submission, archiving, or thesis appendices; **HTML** is for quick browsing. A technical runbook is `docs/PROJECT_IMPLEMENTATION.txt`; an interactive map is `outputs/urban_sprawl_dashboard.html`.
+
+This report documents an end-to-end **reproducible workflow** for mapping multi-temporal land cover, detecting new urban expansion with a deep-learning change model, quantifying sprawl-style patterns (Shannon entropy, UEII, landscape metrics, hotspots), and exploring **associations** between binary urban growth and coarse-scale accessibility / environmental predictors. Optical imagery is sourced from **Microsoft Planetary Computer** (Sentinel-2 and Landsat) and processed in **R** with **terra**; classification uses **randomForest** and **e1071** (SVM); change detection uses a **torch** Siamese convolutional network; sprawl diagnostics use **sf**-based zonal geometry and **landscapemetrics**; driver exploration uses logistic regression and correlation on **stratified samples** (not full-census inference).
+
+**Study area:** `r params$study_name`
+
+::: {.journal-keywords}
+**Keywords:** urban sprawl; land-cover change; deep learning; Shannon entropy; remote sensing; R; reproducible analysis
+:::
+
+::::
+
+---
+
+# Introduction
+
+Urban expansion alters ecosystems, hydrology, and travel patterns. Policy and planning benefit from **repeatable** maps and metrics that separate **where** growth occurred from **how concentrated** it is across distance from the core. This project implements a seven-phase pipeline from imagery to maps, charts, and a web dashboard.
+
+## Research context
+
+Regional studies often combine optical time series, pixel- or object-based classification, and landscape pattern indices. **Change detection** ranges from post-classification comparison to dedicated neural architectures (e.g. Siamese encoders) that learn from bi-temporal feature stacks. **Sprawl** is frequently operationalized via entropy of the spatial distribution of urban area across zones, or via patch/edge metrics from landscape ecology.
+
+## Honest scope of this work
+
+What this pipeline **does** deliver:
+
+- Consistent AOI-wide **LULC** layers for configured years, with documented class codes (1–4).
+- **CNN-derived** binary “new urban” layers for each configured pre/post pair (subject to training data, spatial split, and thresholding).
+- **Zonal** Shannon entropy, UEII, landscape metrics for class 1 (urban), and hotspot polygons under explicit rules.
+- **Exploratory** driver analysis (logistic regression on samples; optional spatial lag model; GWR off by default) on a **coarsened** grid to remain tractable.
+
+What it **does not** claim:
+
+- **Causal** effects of roads or distance to CBD on growth (models are associational; endogeneity is not addressed).
+- **Validated** CNN transfer to cities or years outside the training design without re-training.
+- **Full-resolution** driver surfaces in Phase 6: distances and stacks are computed on an aggregated grid (`phase6.coarsen_fact` / `working_resolution_m`) by design.
+- **Complete** road network representation: OSM coverage varies; failed downloads fall back to placeholder distance fields.
+
+## Research gaps (explicit)
+
+1. **Reference data:** Automated training from WorldCover (or similar) is convenient but may **misalign** with local definitions of “urban”; independent reference labels would strengthen accuracy claims.
+2. **Change validation:** CNN metrics on **patch splits** do not replace **pixel- or object-level** validation against independent change reference.
+3. **Sprawl theory:** Entropy and UEII are **indicators**, not a single definition of “sprawl”; multi-scale and temporal stationarity assumptions deserve sensitivity analysis.
+4. **Drivers:** Sampled logistic models omit unobserved drivers (policy, land market, infrastructure plans). **Spatial autocorrelation** of residuals may remain after a lag model; GWR is optional and heavy.
+5. **Generalization:** Results are **case-specific** to the configured bbox, seasons, and cloud masks; external validity requires re-running or adapting the pipeline.
+
+## What was implemented vs. what remains open (summary)
+
+| Topic | Implemented in this repository | Still open / “gap” |
+|-------|-------------------------------|----------------------|
+| Imagery → features | PC STAC, signing, masking, indices, normalization | Season/cloud sensitivity; no automatic full-year S2 fallback |
+| LULC | RF + SVM, optional auto-training from WorldCover | Independent reference validation; local urban definition |
+| Change | Siamese CNN, spatial block splits, multi-transition | Patch-level metrics are not full-map accuracy; CPU runtime |
+| Sprawl metrics | Rings, Shannon, UEII, landscapemetrics, hotspots | Alternative sprawl definitions; multi-scale sensitivity |
+| Drivers | Coarsened grid, OSM cache, GLM / Moran / lagsarlm | Causality; unobserved confounders; optional GWR cost |
+| Reporting | Static maps/charts, Leaflet, **PDF + HTML** report | Dashboard is exploratory, not a peer-review figure |
+
+---
+
+# Objectives
+
+1. Build analysis-ready multi-temporal **feature** and **LULC** stacks for the study AOI.  
+2. Produce **binary new-urban** maps for each configured epoch pair via the Siamese CNN.  
+3. Summarize **sprawl-relevant** zonal and landscape metrics and identify **hotspot** zones under stated rules.  
+4. Document **associations** between growth and coarse-scale predictors, with clear limits on interpretation.
+
+---
+
+# Study area and configuration
+
+All geographic and processing choices live in **`config/study_area.yml`**: WGS84 bounding box, projected CRS (e.g. UTM), Planetary Computer collections and years, CNN transition list, sprawl centre coordinates, Phase 6/7 options. **Reproducibility** requires versioning or archiving that file alongside outputs.
+
+```{r flowchart, eval=FALSE, fig.cap="Figure 1. Seven-phase workflow (repository methodology figure)."}
+# Omitted by default (optional asset). To include: add docs/methodology-flowchart.png and set eval=TRUE.
+include_project_graphics(fig("docs", "methodology-flowchart.png"))
+```
+
+---
+
+# Materials and methods (summary)
+
+| Phase | Role | Main tools |
+|------:|------|------------|
+| 1 | Imagery acquisition & stacking | rstac, PC signing, terra |
+| 2 | Cloud/shadow masking, indices, normalization | terra |
+| 3 | LULC (RF + SVM), rules, area stats | randomForest, e1071, caret |
+| 4 | Siamese CNN change detection | torch |
+| 5 | Rings, Shannon H, UEII, landscape metrics, hotspots | sf, landscapemetrics |
+| 6 | Driver rasters, stratified sample, GLM / spatial models | terra, osmdata, spdep, spatialreg |
+| 7 | Static maps, charts, Leaflet, this report | tmap, ggplot2, leaflet, rmarkdown |
+
+**Phase 6 note:** Predictor stacks are built on a **coarsened** LULC grid to control compute; interpretations refer to that scale, not necessarily native 10 m pixels.
+
+---
+
+# Results
+
+**Figures** normally come from **`outputs/maps/*.png`** and **`outputs/charts/*.png`**, written by **`run_phase7()`** (tmap/ggplot). If those PNGs are missing, this report **builds the same style of charts from CSVs at knit time** (caption says “knit time”) so Results stay readable. **Maps** (LULC panel, change, hotspots) still need Phase 7 exports and underlying GeoTIFFs. **Tables** use `data/processed/*.csv` and **`outputs/*.csv`**. Always run **`setwd()` to the project root** (or open **`UrbanSprawl.Rproj`**) before **`run_phase7()`** so files land in the real `outputs/` folder.
+
+```{r results-banner, echo=FALSE, results='asis'}
+if (png_n_maps + png_n_charts == 0L) {
+  knitr::asis_output(paste0(
+    "\n\n> **Note:** The folders `", file.path(outd, "maps"), "` and `", file.path(outd, "charts"),
+    "` contain no PNG files yet. Chart-style figures below are built from CSVs at knit time when possible. ",
+    "From the **project root** run `source(\"R/07_visualization.R\"); run_phase7()` to export high-DPI maps and charts.\n\n"
+  ))
+}
+```
+
+```{r outputs-inventory, echo=FALSE}
+inv_dir <- oroot
+if (dir.exists(inv_dir)) {
+  fl <- list.files(inv_dir, pattern = "\\.(png|tif|csv)$", full.names = FALSE, recursive = TRUE, ignore.case = TRUE)
+  fl <- sort(unique(fl))
+  fl <- fl[!grepl("^urban_sprawl_dashboard_files/", fl) & !grepl("^urban_sprawl_report_files/", fl)]
+  if (length(fl)) {
+    nmax <- 60L
+    cap <- paste0(
+      "Inventory of .png / .tif / .csv under outputs/ (showing first ", min(nmax, length(fl)), " of ", length(fl),
+      " paths). Only PNGs in maps/ and charts/ are embedded as figures above."
+    )
+    knitr::kable(
+      data.frame(`File (under outputs/)` = head(fl, nmax), check.names = FALSE),
+      caption = cap
+    )
+    if (length(fl) > nmax) {
+      knitr::asis_output(paste0("\n\n*…and ", length(fl) - nmax, " more paths under `outputs/`.*\n\n"))
+    }
+  }
+}
+```
+
+## Land cover — multi-year panel
+
+```{r lulc-panel, eval=has_o("maps/lulc_panel_map.png"), fig.cap="Figure 2. Classified LULC panel (Phase 3).", echo=FALSE}
+ig_outputs("maps/lulc_panel_map.png")
+```
+
+```{r lulc-missing, eval=!has_o("maps/lulc_panel_map.png"), results="asis"}
+knitr::asis_output(paste0("*Figure omitted: run Phase 3 and Phase 7 to create `", file.path(outd, "maps/lulc_panel_map.png"), "`.*\n\n"))
+```
+
+## Urban area trajectory
+
+```{r growth, fig.width=10, fig.height=6, dev="png", dpi=144, echo=FALSE, fig.cap="Figure 3. Urban class area (km²) by year from `urban_area_stats.csv` (PNG from Phase 7 if present, otherwise drawn when this report is knitted)."}
+if (has_o("charts/urban_growth_trajectory.png")) {
+  ig_outputs("charts/urban_growth_trajectory.png")
+} else if (exists("knit_urban_growth_plot", mode = "function") && file.exists(path_proc("urban_area_stats.csv"))) {
+  gp <- knit_urban_growth_plot(root, params$study_name)
+  if (!is.null(gp)) print(gp) else knitr::asis_output("*Figure 3: could not build chart from `urban_area_stats.csv`.*")
+} else {
+  knitr::asis_output("*Figure 3 omitted: missing CSV, PNG, or `R/report_knit_charts.R` (for knit-time plots).*")
+}
+```
+
+## Shannon entropy (sprawl indicator)
+
+```{r entropy, fig.width=10, fig.height=6, dev="png", dpi=144, echo=FALSE, fig.cap="Figure 4. Relative Shannon entropy across buffer zones (Phase 5)."}
+if (has_o("charts/shannon_entropy_chart.png")) {
+  ig_outputs("charts/shannon_entropy_chart.png")
+} else if (exists("knit_entropy_plot", mode = "function") && file.exists(path_proc("shannon_entropy_results.csv"))) {
+  ep <- knit_entropy_plot(root)
+  if (!is.null(ep)) print(ep) else knitr::asis_output("*Figure 4: could not build from `shannon_entropy_results.csv`.*")
+} else {
+  knitr::asis_output("*Figure 4 omitted: missing Shannon entropy CSV, PNG, or knit helpers.*")
+}
+```
+
+## CNN change maps (new urban)
+
+```{r change-maps}
+fps <- character()
+cfg_rmd <- tryCatch(
+  yaml::read_yaml(fig_abs("config", "study_area.yml")),
+  error = function(e) NULL
+)
+trans <- if (is.null(cfg_rmd) || is.null(cfg_rmd$cnn)) list() else cfg_rmd$cnn$transitions
+if (is.null(trans)) trans <- list()
+for (t in trans) {
+  sub <- sprintf("change_map_%s_%s.png", t$pre, t$post)
+  relm <- paste("maps", sub, sep = "/")
+  if (has_o(relm)) {
+    fps <- c(fps, gsub("\\\\", "/", file.path(outd, relm)))
+  }
+}
+if (length(fps)) {
+  if (knitr::is_html_output()) {
+    knitr::asis_output("<div class=\"journal-figure-grid\">")
+  }
+  include_project_graphics(fps)
+  if (knitr::is_html_output()) {
+    knitr::asis_output("</div>")
+  }
+} else {
+  knitr::asis_output("*No change-map PNGs found. Run Phase 4 and Phase 7 (`save_change_maps`).*")
+}
+```
+
+## Sprawl hotspots (map)
+
+```{r hotspots, eval=has_o("maps/sprawl_hotspot_map.png"), fig.cap="Figure 5. Latest-year LULC with Phase 5 hotspot zones (if produced).", echo=FALSE}
+ig_outputs("maps/sprawl_hotspot_map.png")
+```
+
+## Spatial drivers and correlations
+
+```{r drivers, fig.width=10, fig.height=7, fig.cap="Figure 6. Logistic regression coefficient magnitudes (Phase 6 sample; associational).", dev="png", dpi=144, echo=FALSE}
+if (has_o("charts/driver_importance_chart.png")) {
+  ig_outputs("charts/driver_importance_chart.png")
+} else if (exists("knit_drivers_plot", mode = "function") && file.exists(file.path(oroot, "logistic_regression_results.csv"))) {
+  dp <- knit_drivers_plot(oroot)
+  if (!is.null(dp)) print(dp) else knitr::asis_output("*Figure 6: could not plot driver results.*")
+} else {
+  knitr::asis_output("*Figure 6 omitted: missing `logistic_regression_results.csv` and chart PNG.*")
+}
+```
+
+```{r corr, fig.width=9, fig.height=8, fig.cap="Figure 7. Pearson correlation among sampled response and predictors.", dev="png", dpi=144, echo=FALSE}
+if (has_o("charts/correlation_heatmap.png")) {
+  ig_outputs("charts/correlation_heatmap.png")
+} else if (exists("knit_corr_plot", mode = "function") && requireNamespace("ggcorrplot", quietly = TRUE) && file.exists(file.path(oroot, "correlation_matrix.csv"))) {
+  cp <- knit_corr_plot(oroot)
+  if (!is.null(cp)) print(cp) else knitr::asis_output("*Figure 7: could not build correlation plot.*")
+} else {
+  knitr::asis_output("*Figure 7 omitted: install `ggcorrplot` and ensure `correlation_matrix.csv` exists, or run Phase 7 for PNG.*")
+}
+```
+
+## Landscape metrics
+
+```{r lsm, fig.width=11, fig.height=4.5, fig.cap="Figure 8. Patch density, LPI, edge density (urban class; Phase 5).", dev="png", dpi=144, echo=FALSE}
+if (has_o("charts/landscape_metrics_chart.png")) {
+  ig_outputs("charts/landscape_metrics_chart.png")
+} else if (exists("knit_landscape_plot", mode = "function") && file.exists(path_proc("landscape_metrics.csv"))) {
+  lp <- knit_landscape_plot(root)
+  if (!is.null(lp)) print(lp) else knitr::asis_output("*Figure 8: could not plot landscape metrics.*")
+} else {
+  knitr::asis_output("*Figure 8 omitted: missing `landscape_metrics.csv` and chart PNG.*")
+}
+```
+
+---
+
+# Tables (key CSV outputs)
+
+```{r tables-urban}
+p_urban <- file.path(root, "data", "processed", "urban_area_stats.csv")
+if (file.exists(p_urban)) {
+  u <- utils::read.csv(p_urban, check.names = FALSE)
+  knitr::kable(u, caption = "Table 1. Class areas (km²) by year (Phase 3).")
+}
+```
+
+```{r tables-entropy}
+p_ent <- file.path(root, "data", "processed", "shannon_entropy_results.csv")
+if (file.exists(p_ent)) {
+  e <- utils::read.csv(p_ent, check.names = FALSE)
+  knitr::kable(head(e, 20L), caption = "Table 2. Shannon entropy results (first 20 rows).")
+}
+```
+
+```{r tables-cnn}
+p_cnn <- file.path(oroot, "cnn_accuracy_report.csv")
+if (file.exists(p_cnn)) {
+  cnn <- utils::read.csv(p_cnn, check.names = FALSE)
+  knitr::kable(cnn, caption = "Table 3. CNN change-detection metrics by transition (patch-level; Phase 4).")
+}
+```
+
+```{r tables-glm}
+p_glm <- file.path(oroot, "logistic_regression_results.csv")
+if (file.exists(p_glm)) {
+  g <- utils::read.csv(p_glm, check.names = FALSE)
+  knitr::kable(g, caption = "Table 4. Logistic regression (Phase 6); odds ratios and Wald statistics.")
+}
+```
+
+---
+
+# Discussion
+
+Rising **urban area** in Table 1 and Figure 3 supports a narrative of expansion if consistent with visual change maps. **Relative entropy** (Figure 4) addresses *dispersion* of urban mass across rings: increases may suggest more polycentric or spread-out growth *given the ring geometry*, but zone design (width, CBD choice) strongly shapes the metric. **UEII** and hotspots identify zones where expansion intensity exceeds a stated rule—not universal “bad sprawl” labels.
+
+Phase 6 coefficients (Figure 6–7) summarize **marginal associations** on a stratified sample after coarsening. Distance to roads or centre may correlate with growth for structural reasons that are not policy levers; readers should avoid causal language without a dedicated design.
+
+---
+
+# Limitations and future work
+
+- **Data:** Cloud season, STAC limits, and OSM completeness affect inputs.  
+- **Models:** LULC and CNN performance vary by epoch and city; report `accuracy_report.csv` and `cnn_accuracy_report.csv` alongside claims.  
+- **Scale:** Phase 6 drivers are not native-resolution surfaces; refine `coarsen_fact` only if compute allows.  
+- **Statistics:** Imbalanced growth samples, residual spatial dependence, and single realizations of train/test splits for the CNN warrant sensitivity runs.  
+- **Future:** Independent validation, causal designs (e.g. matching), uncertainty layers, and integration with socio-economic covariates where licensed.
+
+---
+
+# Conclusions
+
+This document bundles **what the pipeline produced** under explicit configuration, separates **deliverables** from **non-claims**, and lists **research gaps** so the work can be cited or extended honestly. **Primary archival format:** `outputs/urban_sprawl_report.pdf` (rendered by Phase 7 when LaTeX is available). For interactive mapping, open **`outputs/urban_sprawl_dashboard.html`**. For line-by-line technical detail, see **`README.md`** and **`docs/PROJECT_IMPLEMENTATION.txt`**.
+
+---
+
+# References (illustrative)
+
+1. Microsoft Planetary Computer STAC API and signed cloud-optimized GeoTIFF access.  
+2. Hafner, S., et al. **landscapemetrics** — R package for landscape ecology metrics.  
+3. McGarigal, K. et al. FRAGSTATS and landscape pattern metrics (conceptual background).  
+4. Literature on Siamese / metric-learning architectures for remote-sensing change detection (survey papers, 2018–present).  
+5. OSM contributors; WorldPop / DEM where used in optional Phase 6 layers.

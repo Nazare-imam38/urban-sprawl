@@ -822,8 +822,10 @@ save_leaflet_dashboard <- function(cfg, fact = 4L) {
 # Main
 # --------------------------------------------------------------------------- #
 
-#' @param render_report If TRUE, renders `docs/urban_sprawl_report.Rmd` to **PDF** (primary) and **HTML**.
-#'   PDF needs a LaTeX engine (e.g. `install.packages("tinytex"); tinytex::install_tinytex()`). If PDF fails, HTML is still attempted.
+#' @param render_report If TRUE, renders `docs/urban_sprawl_report.Rmd` to **PDF** and **HTML** under
+#'   `outputs/`. If FALSE (faster, no LaTeX), only maps/charts/dashboard are written — then run
+#'   [render_urban_sprawl_report()] to build `urban_sprawl_report.html` for the browser.
+#'   PDF needs a LaTeX engine (e.g. `install.packages("tinytex"); tinytex::install_tinytex()`). If PDF fails, HTML is still attempted when `render_report` is TRUE.
 run_phase7 <- function(cfg = load_config(), render_report = TRUE) {
   if (!requireNamespace("scales", quietly = TRUE)) {
     stop("Install scales: install.packages(\"scales\")", call. = FALSE)
@@ -874,7 +876,16 @@ run_phase7 <- function(cfg = load_config(), render_report = TRUE) {
     } else if (!requireNamespace("rmarkdown", quietly = TRUE)) {
       message("Install rmarkdown to render the report: install.packages(\"rmarkdown\")")
     } else {
-      root_n <- normalizePath(project_root(), winslash = "/", mustWork = FALSE)
+      rmd_abs <- normalizePath(rmd, winslash = "/", mustWork = FALSE)
+      doc_dir <- dirname(rmd_abs)
+      root_n <- if (identical(tolower(basename(doc_dir)), "docs")) {
+        normalizePath(file.path(doc_dir, ".."), winslash = "/", mustWork = FALSE)
+      } else {
+        doc_dir
+      }
+      if (!file.exists(file.path(root_n, "config", "study_area.yml"))) {
+        root_n <- normalizePath(project_root(), winslash = "/", mustWork = FALSE)
+      }
       out_sub <- cfg$paths$outputs_dir %||% "outputs"
       out_is_abs <- nzchar(out_sub) && (startsWith(out_sub, "/") || grepl("^[A-Za-z]:[\\\\/]", out_sub))
       outputs_root <- if (out_is_abs) {
@@ -931,6 +942,12 @@ run_phase7 <- function(cfg = load_config(), render_report = TRUE) {
       )
       if (!is.null(out_html)) pipeline_log("Wrote HTML report: ", normalizePath(out_html))
     }
+  } else {
+    pipeline_log(
+      "Phase 7: skipped knitting the written report (render_report = FALSE). ",
+      "PNGs and dashboard are in outputs/; urban_sprawl_report.html was NOT created. ",
+      "Run render_urban_sprawl_report() from the project root to build the HTML report for Live Server / browser."
+    )
   }
 
   pipeline_log("Phase 7 complete. Maps: outputs/maps/ ; charts: outputs/charts/")
@@ -938,6 +955,96 @@ run_phase7 <- function(cfg = load_config(), render_report = TRUE) {
   })
 }
 
+#' Render the research report after maps/charts exist (no LaTeX required for HTML).
+#'
+#' Call after `run_phase7(render_report = FALSE)` or whenever you refresh PNGs and want an updated
+#' `outputs/urban_sprawl_report.html`. Live Server expects this file under your project’s `outputs/`.
+#'
+#' @param cfg Config from [load_config()].
+#' @param html If TRUE, write `urban_sprawl_report.html` (`html_document`).
+#' @param pdf If TRUE, write `urban_sprawl_report.pdf` (needs LaTeX / TinyTeX).
+#' @param quiet Passed to [rmarkdown::render()].
+#' @return Invisibly, a list with elements `html` and `pdf` (paths or NULL if skipped/failed).
+render_urban_sprawl_report <- function(cfg = load_config(), html = TRUE, pdf = FALSE, quiet = TRUE) {
+  if (!requireNamespace("rmarkdown", quietly = TRUE)) {
+    stop("Install rmarkdown: install.packages(\"rmarkdown\")", call. = FALSE)
+  }
+  rmd <- file.path(project_root(), "docs", "urban_sprawl_report.Rmd")
+  if (!file.exists(rmd)) {
+    stop("Report template missing: ", rmd, call. = FALSE)
+  }
+  rmd_abs <- normalizePath(rmd, winslash = "/", mustWork = FALSE)
+  doc_dir <- dirname(rmd_abs)
+  root_n <- if (identical(tolower(basename(doc_dir)), "docs")) {
+    normalizePath(file.path(doc_dir, ".."), winslash = "/", mustWork = FALSE)
+  } else {
+    doc_dir
+  }
+  if (!file.exists(file.path(root_n, "config", "study_area.yml"))) {
+    root_n <- normalizePath(project_root(), winslash = "/", mustWork = FALSE)
+  }
+  out_sub <- cfg$paths$outputs_dir %||% "outputs"
+  out_is_abs <- nzchar(out_sub) && (startsWith(out_sub, "/") || grepl("^[A-Za-z]:[\\\\/]", out_sub))
+  outputs_root <- if (out_is_abs) {
+    normalizePath(out_sub, winslash = "/", mustWork = FALSE)
+  } else {
+    normalizePath(file.path(root_n, out_sub), winslash = "/", mustWork = FALSE)
+  }
+  rep_params <- list(
+    project_root = root_n,
+    study_name = cfg$study_area$name %||% "Study area",
+    outputs_dir = out_sub,
+    outputs_root = outputs_root
+  )
+  out_dir <- resolved_out_dir(cfg)
+  knit_root <- root_n
+  res <- list(html = NULL, pdf = NULL)
+  if (isTRUE(pdf)) {
+    res$pdf <- tryCatch(
+      rmarkdown::render(
+        rmd,
+        output_file = "urban_sprawl_report.pdf",
+        output_dir = out_dir,
+        params = rep_params,
+        output_format = "pdf_document",
+        knit_root_dir = knit_root,
+        quiet = quiet
+      ),
+      error = function(e) {
+        warning("PDF report failed: ", conditionMessage(e), call. = FALSE)
+        NULL
+      }
+    )
+    if (!is.null(res$pdf)) {
+      message("Wrote PDF: ", normalizePath(res$pdf, winslash = "/", mustWork = FALSE))
+    }
+  }
+  if (isTRUE(html)) {
+    res$html <- tryCatch(
+      rmarkdown::render(
+        rmd,
+        output_file = "urban_sprawl_report.html",
+        output_dir = out_dir,
+        params = rep_params,
+        output_format = "html_document",
+        knit_root_dir = knit_root,
+        quiet = quiet
+      ),
+      error = function(e) {
+        warning("HTML report failed: ", conditionMessage(e), call. = FALSE)
+        NULL
+      }
+    )
+    if (!is.null(res$html)) {
+      message("Wrote HTML: ", normalizePath(res$html, winslash = "/", mustWork = FALSE))
+    }
+  }
+  invisible(res)
+}
+
 if (interactive()) {
-  message("Phase 7: run_phase7() after Phases 3–6 (partial inputs OK; missing files are skipped).")
+  message(
+    "Phase 7: run_phase7() after Phases 3–6. ",
+    "Use run_phase7(render_report = FALSE) for PNGs only; then render_urban_sprawl_report() for outputs/urban_sprawl_report.html."
+  )
 }

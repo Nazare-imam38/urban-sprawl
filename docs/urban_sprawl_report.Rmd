@@ -213,7 +213,7 @@ abs_to_knit_rel <- function(abs_paths) {
     gsub("\\\\", "/", rel)
   }, character(1), USE.NAMES = FALSE)
 }
-encode_file_img_html <- function(abs_path) {
+encode_file_img_html <- function(abs_path, extra_class = "") {
   abs_path <- normalizePath(abs_path, winslash = "/", mustWork = TRUE)
   n <- file.info(abs_path)$size
   raw <- readBin(abs_path, "raw", n = n)
@@ -226,15 +226,26 @@ encode_file_img_html <- function(abs_path) {
     "image/png"
   )
   b64 <- xfun::base64_encode(raw)
+  extra_class <- trimws(as.character(extra_class)[1L])
+  cls <- paste(c("report-fig-img", extra_class), collapse = " ")
   img <- paste0(
     "<img src=\"data:", mime, ";base64,", b64,
-    "\" class=\"report-fig-img\" style=\"max-width:100%;width:100%;height:auto\" alt=\"\" />"
+    "\" class=\"", cls, "\" style=\"max-width:100%;height:auto\" alt=\"\" />"
   )
   paste0("```{=html}\n", img, "\n```\n")
 }
 embed_o_html <- function(path_under_outputs) {
+  rel <- gsub("\\\\", "/", as.character(path_under_outputs)[1L])
+  kind <- if (startsWith(rel, "charts/")) {
+    "report-fig-chart"
+  } else if (startsWith(rel, "maps/")) {
+    "report-fig-map"
+  } else {
+    ""
+  }
   encode_file_img_html(
-    normalizePath(file.path(oroot, path_under_outputs), winslash = "/", mustWork = TRUE)
+    normalizePath(file.path(oroot, rel), winslash = "/", mustWork = TRUE),
+    extra_class = kind
   )
 }
 include_project_graphics <- function(paths) {
@@ -260,7 +271,8 @@ include_project_graphics <- function(paths) {
     stop("Missing figure file(s): ", paste(paths[miss], collapse = ", "), call. = FALSE)
   }
   if (report_use_md_fig_embed()) {
-    lines <- vapply(paths_abs, encode_file_img_html, character(1))
+    # Default multi-image blocks to “map width” (change maps) unless caller embeds individually.
+    lines <- vapply(paths_abs, encode_file_img_html, character(1), extra_class = "report-fig-map")
     return(paste0("\n\n", paste(lines, collapse = "\n\n"), "\n\n"))
   }
   paths_use <- paths_abs
@@ -503,13 +515,60 @@ div.toc-content img.report-fig-img,
 div.toc-content .figure img,
 div.toc-content figure img {
   display: block;
-  width: 100% !important;
-  max-width: min(1200px, 100%);
+  /* Journal-style: figures centered, not full-bleed */
+  width: auto !important;
+  max-width: min(82ch, 100%);
   height: auto !important;
-  max-height: 82vh;
+  max-height: 62vh;
   object-fit: contain;
   margin-left: auto;
   margin-right: auto;
+}
+
+/* Option A (IEEE/MDPI-like):
+   - charts: single-column width (text measure)
+   - maps: wider two-column width, still centered and capped */
+div.toc-content img.report-fig-chart {
+  /* Charts: single-column journal figure (narrower than text column) */
+  max-width: min(18.75rem, 100%) !important; /* 300px at 16px/rem */
+  max-height: 52vh !important;
+}
+div.toc-content img.report-fig-map {
+  /* Slightly smaller than full “two-column” so maps don’t overwhelm */
+  max-width: min(15.625rem, 100%) !important; /* 250px at 16px/rem */
+  max-height: 50vh !important;
+}
+
+/* Inline styles from embedded <img> must not force full width */
+div.toc-content img[style*="width"] {
+  width: auto !important;
+  max-width: min(15.625rem, 100%) !important;
+}
+
+/* rmarkdown/knitr sometimes emits base64 figures without our custom classes. Constrain those too. */
+div.toc-content img[role="img"],
+div.toc-content img[src^="data:image"] {
+  display: block;
+  width: auto !important;
+  max-width: min(18.75rem, 100%) !important; /* default: chart-like width */
+  height: auto !important;
+  max-height: 52vh;
+  object-fit: contain;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* If it *is* a tagged map, allow the wider map width (still capped). */
+div.toc-content img[role="img"].report-fig-map,
+div.toc-content img[src^="data:image"].report-fig-map {
+  max-width: min(15.625rem, 100%) !important;
+  max-height: 50vh !important;
+}
+
+/* Keep figure blocks aligned + add breathing room */
+div.toc-content .figure,
+div.toc-content figure {
+  margin: 1.25rem auto 1.5rem auto;
 }
 
 /* Captions: align with text measure and improve readability. */
@@ -624,7 +683,7 @@ div.toc-content .journal-abstract-section {
   background: linear-gradient(180deg, #f5fbf8 0%, #fafcfb 100%);
   border: 1px solid #b8dcc8;
   border-left: 5px solid #1a6f54;
-  padding: 1.1rem 1.3rem 1.25rem;
+  padding: 0.85rem 1.05rem 0.95rem;
   margin: 0 0 2.25rem;
   border-radius: 0 3px 3px 0;
   box-shadow: 0 1px 4px rgba(26, 111, 84, 0.08);
@@ -643,9 +702,9 @@ div.toc-content .journal-abstract-section h1 .header-section-number {
 /* Keywords line (MDPI-style) */
 .journal-keywords {
   font-family: "IBM Plex Sans", system-ui, sans-serif;
-  font-size: 0.86rem;
-  margin-top: 1.1rem;
-  padding-top: 1rem;
+  font-size: 0.80rem;
+  margin-top: 0.75rem;
+  padding-top: 0.65rem;
   border-top: 1px solid #a8d4bc;
   color: #333;
   line-height: 1.55;

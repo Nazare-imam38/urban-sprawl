@@ -381,7 +381,7 @@ body::before {
 
 body {
   font-family: "Crimson Pro", "Times New Roman", Times, "Liberation Serif", Georgia, serif;
-  font-size: 17px;
+  font-size: 16px;
   line-height: 1.65;
   margin: 0;
   padding: 0 0 3rem;
@@ -405,10 +405,13 @@ div.toc-content :not(pre) > code {
 
 /* Page shell — single column; avoid Bootstrap 3 float grid splitting TOC vs body. */
 div.main-container.container-fluid {
-  max-width: 52rem;
+  /* Wider “full-page” research layout (use more of the screen) */
+  max-width: 100vw;
+  width: 100vw;
   margin-left: auto;
   margin-right: auto;
-  padding: 1rem clamp(0.75rem, 3vw, 1.5rem) 3rem;
+  /* Reduce outer gutters without changing type size */
+  padding: 0.75rem clamp(0.5rem, 1.25vw, 1.25rem) 3rem;
   background: #eceff1;
   box-sizing: border-box;
 }
@@ -458,13 +461,66 @@ div.toc-content {
   width: 100% !important;
   max-width: 100% !important;
   margin: 0 !important;
-  padding: 2rem 2.25rem 2.5rem !important;
+  padding: 1.75rem clamp(0.9rem, 1.6vw, 2rem) 2.5rem !important;
   box-sizing: border-box;
   background: #fff;
   border-radius: 4px;
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
   border: 1px solid #dde3ea;
   clear: both;
+}
+
+/* Keep paragraphs readable on wide screens (don’t stretch text edge-to-edge). */
+div.toc-content p,
+div.toc-content ul,
+div.toc-content ol,
+div.toc-content blockquote {
+  max-width: 82ch;
+}
+div.toc-content p,
+div.toc-content ul,
+div.toc-content ol,
+div.toc-content blockquote,
+div.toc-content h1,
+div.toc-content h2,
+div.toc-content h3,
+div.toc-content h4 {
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* But let figures/tables use the full available width. */
+div.toc-content .figure,
+div.toc-content figure,
+div.toc-content table,
+div.toc-content .html-widget,
+div.toc-content pre {
+  max-width: 100%;
+}
+
+/* Responsive sizing for embedded PNG charts/maps. */
+div.toc-content img.report-fig-img,
+div.toc-content .figure img,
+div.toc-content figure img {
+  display: block;
+  width: 100% !important;
+  max-width: min(1200px, 100%);
+  height: auto !important;
+  max-height: 82vh;
+  object-fit: contain;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* Captions: align with text measure and improve readability. */
+div.toc-content p.caption,
+div.toc-content figcaption,
+div.toc-content table caption {
+  max-width: 82ch;
+  margin-left: auto;
+  margin-right: auto;
+  font-size: 0.95em;
+  line-height: 1.45;
 }
 
 /* Pandoc sections must stack (never sit side-by-side) */

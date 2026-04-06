@@ -6,10 +6,17 @@ date: "`r format(Sys.Date(), '%d %B %Y')`"
 output:
   html_document:
     self_contained: true
+    # Pandoc resolves images from the .knit.md directory; also pass explicit --resource-path so
+    # this survives output_format = html_document(keep_md = TRUE) (which can drop YAML resource_path).
+    resource_path: [".."]
+    pandoc_args:
+      - --resource-path
+      - ..
     md_extensions: "+raw_html"
     toc: true
     toc_depth: 3
     toc_float: false
+    section_divs: false
     theme: flatly
     highlight: tango
     number_sections: true
@@ -56,7 +63,7 @@ infer_root_from_rmd <- tryCatch(
     if (is.null(rd) || !nzchar(rd)) {
       return(NULL)
     }
-    doc_dir <- normalizePath(rd, winslash = "/", mustWork = FALSE)
+    doc_dir <- normalizePath(dirname(rd), winslash = "/", mustWork = FALSE)
     cand <- normalizePath(file.path(doc_dir, ".."), winslash = "/", mustWork = FALSE)
     yml <- file.path(cand, "config", "study_area.yml")
     if (file.exists(yml)) cand else NULL
@@ -87,7 +94,7 @@ repo_from_rmd <- tryCatch({
     ""
   } else {
     rd <- normalizePath(rd, winslash = "/", mustWork = FALSE)
-    normalizePath(file.path(rd, ".."), winslash = "/", mustWork = FALSE)
+    normalizePath(file.path(dirname(rd), ".."), winslash = "/", mustWork = FALSE)
   }
 }, error = function(e) "")
 candidates <- unique(c(
@@ -144,7 +151,27 @@ if (length(png_counts) && max(png_counts) > 0L) {
 }
 png_n_maps <- length(Sys.glob(file.path(oroot, "maps", "*.png")))
 png_n_charts <- length(Sys.glob(file.path(oroot, "charts", "*.png")))
-if (knitr::is_html_output() && png_n_maps + png_n_charts == 0L) {
+cat(
+  paste0(
+    "[report setup] root  = ", root, "\n",
+    "[report setup] oroot = ", oroot, "\n",
+    "[report setup] maps PNGs: ", png_n_maps, " | charts PNGs: ", png_n_charts, "\n"
+  ),
+  file = stderr()
+)
+flush(stderr())
+report_use_md_fig_embed <- function() {
+  to <- knitr::opts_knit$get("rmarkdown.pandoc.to")
+  if (length(to) && nzchar(to[[1L]])) {
+    t0 <- tolower(as.character(to[[1L]]))
+    if (grepl("latex", t0, fixed = TRUE) || grepl("beamer", t0, fixed = TRUE)) {
+      return(FALSE)
+    }
+    return(grepl("html", t0, fixed = TRUE))
+  }
+  isTRUE(knitr::is_html_output()) || !isTRUE(knitr::is_latex_output())
+}
+if (report_use_md_fig_embed() && png_n_maps + png_n_charts == 0L) {
   message(
     "\n*** urban_sprawl_report: no PNG files in ", file.path(outd, "maps|charts"), ".\n",
     "    Project root: ", root, "\n",
@@ -156,9 +183,9 @@ if (knitr::is_html_output() && png_n_maps + png_n_charts == 0L) {
   )
 }
 
-# Paths for knitr::include_graphics() must be relative to knit_root_dir when set so rmarkdown can
-# copy into *_files/ and pandoc --embed-resources inlines them (reliable HTML). Base64 asis_output
-# was dropped by some Pandoc/markdown paths.
+# HTML: embed PNGs/JPEGs as data: URIs in the .md so Pandoc never has to open paths on disk (rmarkdown
+# often passes --resource-path .. relative to a temp dir, so outputs/maps/... is not found). PDF still
+# uses [abs_to_knit_rel()] + include_graphics().
 knit_root_dir_get <- function() {
   rd <- knitr::opts_knit$get("root.dir")
   if (!length(rd) || !nzchar(rd[[1L]])) {
@@ -186,6 +213,30 @@ abs_to_knit_rel <- function(abs_paths) {
     gsub("\\\\", "/", rel)
   }, character(1), USE.NAMES = FALSE)
 }
+encode_file_img_html <- function(abs_path) {
+  abs_path <- normalizePath(abs_path, winslash = "/", mustWork = TRUE)
+  n <- file.info(abs_path)$size
+  raw <- readBin(abs_path, "raw", n = n)
+  ext <- tolower(tools::file_ext(abs_path))
+  mime <- switch(
+    ext,
+    "png" = "image/png",
+    "jpg" = , "jpeg" = "image/jpeg",
+    "gif" = "image/gif",
+    "image/png"
+  )
+  b64 <- xfun::base64_encode(raw)
+  img <- paste0(
+    "<img src=\"data:", mime, ";base64,", b64,
+    "\" class=\"report-fig-img\" style=\"max-width:100%;width:100%;height:auto\" alt=\"\" />"
+  )
+  paste0("```{=html}\n", img, "\n```\n")
+}
+embed_o_html <- function(path_under_outputs) {
+  encode_file_img_html(
+    normalizePath(file.path(oroot, path_under_outputs), winslash = "/", mustWork = TRUE)
+  )
+}
 include_project_graphics <- function(paths) {
   paths <- as.character(paths)
   paths <- paths[nzchar(paths)]
@@ -207,6 +258,10 @@ include_project_graphics <- function(paths) {
   miss <- !file.exists(paths_abs)
   if (any(miss)) {
     stop("Missing figure file(s): ", paste(paths[miss], collapse = ", "), call. = FALSE)
+  }
+  if (report_use_md_fig_embed()) {
+    lines <- vapply(paths_abs, encode_file_img_html, character(1))
+    return(paste0("\n\n", paste(lines, collapse = "\n\n"), "\n\n"))
   }
   paths_use <- paths_abs
   if (knitr::is_latex_output() && identical(.Platform$OS.type, "windows")) {
@@ -257,18 +312,14 @@ fig_o <- function(path_under_outputs) {
   p
 }
 
-# HTML + PDF: use include_graphics(); HTML paths are relative to knit_root_dir for self-contained.
+# PDF only (HTML uses [embed_o_html()] in chunks — see [report_use_md_fig_embed()]).
 ig_outputs <- function(path_under_outputs) {
   abs_p <- normalizePath(file.path(oroot, path_under_outputs), winslash = "/", mustWork = FALSE)
   if (!file.exists(abs_p)) {
     knitr::asis_output(paste0("\n\n*Missing figure: `", file.path(outd, path_under_outputs), "`.*\n\n"))
     return(invisible(NULL))
   }
-  if (knitr::is_html_output()) {
-    knitr::include_graphics(abs_to_knit_rel(abs_p))
-  } else {
-    knitr::include_graphics(fig_o(path_under_outputs))
-  }
+  knitr::include_graphics(fig_o(path_under_outputs))
   invisible(NULL)
 }
 
@@ -305,14 +356,12 @@ has_knit_fn <- function(nm) {
 
 if (knitr::is_latex_output()) {
   knitr::opts_chunk$set(out.width = "0.92\\linewidth")
-} else if (knitr::is_html_output()) {
-  knitr::opts_chunk$set(out.width = "100%", out.extra = 'class="report-fig-img"')
 } else {
-  knitr::opts_chunk$set(out.width = "92%")
+  knitr::opts_chunk$set(out.width = "100%", out.extra = 'class="report-fig-img"')
 }
 ```
 
-```{css, echo=FALSE, eval=knitr::is_html_output()}
+```{css, echo=FALSE, eval=!knitr::is_latex_output()}
 /*
  * IEEE / MDPI–inspired article layout (HTML): serif body, sans headings,
  * MDPI-style green + IEEE blue accents, structured abstract block, TOC on top.
@@ -849,7 +898,7 @@ include_project_graphics(fig("docs", "methodology-flowchart.png"))
 
 **Figures** normally come from **`outputs/maps/*.png`** and **`outputs/charts/*.png`**, written by **`run_phase7()`** (tmap/ggplot). If those PNGs are missing, this report **builds the same style of charts from CSVs at knit time** (caption says “knit time”) so Results stay readable. **Maps** (LULC panel, change, hotspots) still need Phase 7 exports and underlying GeoTIFFs. **Tables** use `data/processed/*.csv` and **`outputs/*.csv`**. Always run **`setwd()` to the project root** (or open **`UrbanSprawl.Rproj`**) before **`run_phase7()`** so files land in the real `outputs/` folder.
 
-```{r results-banner, echo=FALSE, results='asis'}
+```{r results-banner, echo=FALSE}
 if (png_n_maps + png_n_charts == 0L) {
   knitr::asis_output(paste0(
     "\n\n> **Note:** The folders `", file.path(outd, "maps"), "` and `", file.path(outd, "charts"),
@@ -859,41 +908,26 @@ if (png_n_maps + png_n_charts == 0L) {
 }
 ```
 
-```{r outputs-inventory, echo=FALSE}
-inv_dir <- oroot
-if (!dir.exists(inv_dir)) {
-  knitr::asis_output(paste0(
-    "\n\n*Outputs inventory skipped: directory does not exist: `", inv_dir, "`*\n\n"
-  ))
-} else {
-  fl <- list.files(inv_dir, pattern = "\\.(png|tif|csv)$", full.names = FALSE, recursive = TRUE, ignore.case = TRUE)
-  fl <- sort(unique(fl))
-  fl <- fl[!grepl("^urban_sprawl_dashboard_files/", fl) & !grepl("^urban_sprawl_report_files/", fl)]
-  if (length(fl)) {
-    nmax <- 60L
-    cap <- paste0(
-      "Inventory of .png / .tif / .csv under outputs/ (showing first ", min(nmax, length(fl)), " of ", length(fl),
-      " paths). Only PNGs in maps/ and charts/ are embedded as figures above."
-    )
-    knitr::kable(
-      data.frame(`File (under outputs/)` = head(fl, nmax), check.names = FALSE),
-      caption = cap
-    )
-    if (length(fl) > nmax) {
-      knitr::asis_output(paste0("\n\n*…and ", length(fl) - nmax, " more paths under `outputs/`.*\n\n"))
-    }
-  } else {
-    knitr::asis_output(paste0(
-      "\n\n*No .png / .tif / .csv found under `", inv_dir, "` (recursive). Check Phase 7 and `oroot`.*\n\n"
-    ))
-  }
-}
+```{r outputs-inventory, echo=FALSE, eval=FALSE}
+invisible(NULL)
 ```
 
 ## Land cover — multi-year panel
 
 ```{r lulc-fig, echo=FALSE}
-if (has_o("maps/lulc_panel_map.png")) {
+if (report_use_md_fig_embed()) {
+  knitr::asis_output(
+    if (has_o("maps/lulc_panel_map.png")) {
+      paste0(
+        "**Figure 2.** Classified LULC panel (Phase 3).\n\n",
+        embed_o_html("maps/lulc_panel_map.png"),
+        "\n"
+      )
+    } else {
+      paste0("\n\n*Figure 2 omitted: run Phase 3 and Phase 7 to create `", file.path(outd, "maps/lulc_panel_map.png"), "`.*\n\n")
+    }
+  )
+} else if (has_o("maps/lulc_panel_map.png")) {
   knitr::asis_output("**Figure 2.** Classified LULC panel (Phase 3).\n\n")
   ig_outputs("maps/lulc_panel_map.png")
 } else {
@@ -904,7 +938,13 @@ if (has_o("maps/lulc_panel_map.png")) {
 ## Urban area trajectory
 
 ```{r growth-png, echo=FALSE}
-if (has_o("charts/urban_growth_trajectory.png")) {
+if (report_use_md_fig_embed() && has_o("charts/urban_growth_trajectory.png")) {
+  knitr::asis_output(paste0(
+    "**Figure 3.** Urban class area (km²) by year (Phase 3; chart PNG from Phase 7).\n\n",
+    embed_o_html("charts/urban_growth_trajectory.png"),
+    "\n"
+  ))
+} else if (!report_use_md_fig_embed() && has_o("charts/urban_growth_trajectory.png")) {
   knitr::asis_output("**Figure 3.** Urban class area (km²) by year (Phase 3; chart PNG from Phase 7).\n\n")
   ig_outputs("charts/urban_growth_trajectory.png")
 }
@@ -928,7 +968,13 @@ if (has_o("charts/urban_growth_trajectory.png")) {
 ## Shannon entropy (sprawl indicator)
 
 ```{r entropy-png, echo=FALSE}
-if (has_o("charts/shannon_entropy_chart.png")) {
+if (report_use_md_fig_embed() && has_o("charts/shannon_entropy_chart.png")) {
+  knitr::asis_output(paste0(
+    "**Figure 4.** Relative Shannon entropy across buffer zones (Phase 5).\n\n",
+    embed_o_html("charts/shannon_entropy_chart.png"),
+    "\n"
+  ))
+} else if (!report_use_md_fig_embed() && has_o("charts/shannon_entropy_chart.png")) {
   knitr::asis_output("**Figure 4.** Relative Shannon entropy across buffer zones (Phase 5).\n\n")
   ig_outputs("charts/shannon_entropy_chart.png")
 }
@@ -967,8 +1013,15 @@ for (t in trans) {
   }
 }
 if (length(fps)) {
-  knitr::asis_output("**Change maps (new urban).** CNN-derived transitions (Phase 4/7).\n\n")
-  include_project_graphics(fps)
+  if (report_use_md_fig_embed()) {
+    knitr::asis_output(paste0(
+      "**Change maps (new urban).** CNN-derived transitions (Phase 4/7).\n\n",
+      include_project_graphics(fps)
+    ))
+  } else {
+    knitr::asis_output("**Change maps (new urban).** CNN-derived transitions (Phase 4/7).\n\n")
+    include_project_graphics(fps)
+  }
 } else {
   knitr::asis_output("*No change-map PNGs found. Run Phase 4 and Phase 7 (`save_change_maps`).*")
 }
@@ -977,7 +1030,19 @@ if (length(fps)) {
 ## Sprawl hotspots (map)
 
 ```{r hotspots-fig, echo=FALSE}
-if (has_o("maps/sprawl_hotspot_map.png")) {
+if (report_use_md_fig_embed()) {
+  knitr::asis_output(
+    if (has_o("maps/sprawl_hotspot_map.png")) {
+      paste0(
+        "**Figure 5.** Latest-year LULC with Phase 5 hotspot zones (if produced).\n\n",
+        embed_o_html("maps/sprawl_hotspot_map.png"),
+        "\n"
+      )
+    } else {
+      "\n\n*Figure 5 omitted: run Phase 5 and Phase 7 to create `outputs/maps/sprawl_hotspot_map.png`.*\n\n"
+    }
+  )
+} else if (has_o("maps/sprawl_hotspot_map.png")) {
   knitr::asis_output("**Figure 5.** Latest-year LULC with Phase 5 hotspot zones (if produced).\n\n")
   ig_outputs("maps/sprawl_hotspot_map.png")
 } else {
@@ -988,7 +1053,13 @@ if (has_o("maps/sprawl_hotspot_map.png")) {
 ## Spatial drivers and correlations
 
 ```{r drivers-png, echo=FALSE}
-if (has_o("charts/driver_importance_chart.png")) {
+if (report_use_md_fig_embed() && has_o("charts/driver_importance_chart.png")) {
+  knitr::asis_output(paste0(
+    "**Figure 6.** Logistic regression coefficient magnitudes (Phase 6 sample; associational).\n\n",
+    embed_o_html("charts/driver_importance_chart.png"),
+    "\n"
+  ))
+} else if (!report_use_md_fig_embed() && has_o("charts/driver_importance_chart.png")) {
   knitr::asis_output("**Figure 6.** Logistic regression coefficient magnitudes (Phase 6 sample; associational).\n\n")
   ig_outputs("charts/driver_importance_chart.png")
 }
@@ -1010,7 +1081,13 @@ if (has_o("charts/driver_importance_chart.png")) {
 ```
 
 ```{r corr-png, echo=FALSE}
-if (has_o("charts/correlation_heatmap.png")) {
+if (report_use_md_fig_embed() && has_o("charts/correlation_heatmap.png")) {
+  knitr::asis_output(paste0(
+    "**Figure 7.** Pearson correlation among sampled response and predictors.\n\n",
+    embed_o_html("charts/correlation_heatmap.png"),
+    "\n"
+  ))
+} else if (!report_use_md_fig_embed() && has_o("charts/correlation_heatmap.png")) {
   knitr::asis_output("**Figure 7.** Pearson correlation among sampled response and predictors.\n\n")
   ig_outputs("charts/correlation_heatmap.png")
 }
@@ -1034,7 +1111,13 @@ if (has_o("charts/correlation_heatmap.png")) {
 ## Landscape metrics
 
 ```{r lsm-png, echo=FALSE}
-if (has_o("charts/landscape_metrics_chart.png")) {
+if (report_use_md_fig_embed() && has_o("charts/landscape_metrics_chart.png")) {
+  knitr::asis_output(paste0(
+    "**Figure 8.** Patch density, LPI, edge density (urban class; Phase 5).\n\n",
+    embed_o_html("charts/landscape_metrics_chart.png"),
+    "\n"
+  ))
+} else if (!report_use_md_fig_embed() && has_o("charts/landscape_metrics_chart.png")) {
   knitr::asis_output("**Figure 8.** Patch density, LPI, edge density (urban class; Phase 5).\n\n")
   ig_outputs("charts/landscape_metrics_chart.png")
 }

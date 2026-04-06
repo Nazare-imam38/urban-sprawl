@@ -27,3 +27,4 @@ docs/*.log
 docs/*.toc
 docs/*.knit.md
 docs/urban_sprawl_report.pdf
+.Rproj.user

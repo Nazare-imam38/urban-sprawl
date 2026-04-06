@@ -16,7 +16,22 @@ suppressPackageStartupMessages({
 })
 
 project_root <- function() {
-  getwd()
+  start <- normalizePath(getwd(), winslash = "/", mustWork = FALSE)
+  yml_here <- function(dir) {
+    file.exists(file.path(dir, "config", "study_area.yml"))
+  }
+  dir <- start
+  for (i in seq_len(20L)) {
+    if (yml_here(dir)) {
+      return(dir)
+    }
+    parent <- normalizePath(file.path(dir, ".."), winslash = "/", mustWork = FALSE)
+    if (identical(parent, dir)) {
+      break
+    }
+    dir <- parent
+  }
+  start
 }
 
 load_config <- function(path = NULL) {

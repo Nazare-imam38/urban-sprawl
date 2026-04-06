@@ -998,6 +998,9 @@ render_urban_sprawl_report <- function(cfg = load_config(), html = TRUE, pdf = F
   )
   out_dir <- resolved_out_dir(cfg)
   knit_root <- root_n
+  oldwd <- getwd()
+  on.exit(setwd(oldwd), add = TRUE)
+  setwd(knit_root)
   res <- list(html = NULL, pdf = NULL)
   if (isTRUE(pdf)) {
     res$pdf <- tryCatch(
@@ -1020,6 +1023,7 @@ render_urban_sprawl_report <- function(cfg = load_config(), html = TRUE, pdf = F
     }
   }
   if (isTRUE(html)) {
+    knit_norm <- normalizePath(knit_root, winslash = "/", mustWork = FALSE)
     res$html <- tryCatch(
       rmarkdown::render(
         rmd,
@@ -1027,6 +1031,7 @@ render_urban_sprawl_report <- function(cfg = load_config(), html = TRUE, pdf = F
         output_dir = out_dir,
         params = rep_params,
         output_format = "html_document",
+        output_options = list(resource_path = knit_norm),
         knit_root_dir = knit_root,
         quiet = quiet
       ),

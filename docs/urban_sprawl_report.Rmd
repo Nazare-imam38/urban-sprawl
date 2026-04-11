@@ -24,7 +24,6 @@ output:
     number_section_depth: 3
     fig_caption: true
     df_print: kable
-    code_folding: hide
   pdf_document:
     toc: true
     toc_depth: 3
@@ -230,8 +229,10 @@ encode_file_img_html <- function(abs_path, extra_class = "") {
   extra_class <- trimws(as.character(extra_class)[1L])
   cls <- paste(c("report-fig-img", extra_class), collapse = " ")
   img <- paste0(
+    "<div class=\"report-media-embed\">",
     "<img src=\"data:", mime, ";base64,", b64,
-    "\" class=\"", cls, "\" style=\"max-width:100%;height:auto\" alt=\"\" />"
+    "\" class=\"", cls, "\" alt=\"\" />",
+    "</div>"
   )
   paste0("```{=html}\n", img, "\n```\n")
 }

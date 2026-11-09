@@ -150,3 +150,5 @@ The step-by-step methodology (all phases, tools, and the three final outputs) is
 ## CV line (when complete)
 
 **Multi-Temporal Urban Sprawl Detection using CNN & Remote Sensing in R** — R, PyTorch (**torch**), Google Earth Engine (**rgee**), Sentinel-2, Landsat, **terra**, **landscapemetrics**, **leaflet**. End-to-end urban growth pipeline: RF/SVM + CNN change detection, Shannon entropy sprawl metrics, growth hotspots, and correlations with roads and vegetation loss for spatial decision support.
+#   U r b a n - S p r a w l - W o r k f l o w  
+ 
